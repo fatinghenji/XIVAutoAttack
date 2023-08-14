@@ -1,144 +1,190 @@
-﻿using Dalamud.Game.ClientState.Objects.SubKinds;
+﻿using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Game.ClientState.Objects.SubKinds;
+using Dalamud.Logging;
+using ECommons.DalamudServices;
+using ECommons.GameHelpers;
 using FFXIVClientStructs.FFXIV.Client.Game;
-using RotationSolver.Actions;
+using FFXIVClientStructs.FFXIV.Client.UI.Agent;
+using RotationSolver.Basic.Configuration;
 using RotationSolver.Commands;
-using RotationSolver.Data;
-using RotationSolver.Helpers;
-using RotationSolver.SigReplacers;
-using System;
-using System.ComponentModel;
-using System.Diagnostics;
 
 namespace RotationSolver.Updaters;
 
 internal static class ActionUpdater
 {
-    private static unsafe IntPtr ComboTimer => (IntPtr)((byte*)ActionManager.Instance() + 0x60);
-    public static unsafe float ComboTime => *(float*)ComboTimer;
-    private static IntPtr LastComboMove => ComboTimer + 4;
-    public static unsafe ActionID LastComboAction => *(ActionID*)LastComboMove;
+    internal static DateTime _cancelTime = DateTime.MinValue;
 
+    static  RandomDelay _GCDDelay = new(() =>
+    (Service.Config.GetValue(PluginConfigFloat.WeaponDelayMin),
+    Service.Config.GetValue(PluginConfigFloat.WeaponDelayMax)));
 
-    internal static float WeaponRemain { get; private set; } = 0;
+    internal static IAction NextAction { get; set; }
+    internal static IBaseAction NextGCDAction { get; set; }
+    internal static IAction WrongAction { get; set; }
+    static Random _wrongRandom = new();
 
-    internal static float WeaponTotal { get; private set; } = 0;
-
-    internal static float WeaponElapsed { get; private set; } = 0;
-
-    internal static bool InCombat { get; private set; } = false;
-
-    internal static byte AbilityRemainCount { get; private set; } = 0;
-
-    internal static float AbilityRemain { get; private set; } = 0;
-
-    internal static uint[] BluSlots { get; private set; } = new uint[24];
-
-    internal static IAction NextAction { get; private set; }
-
-#if DEBUG
-    internal static Exception exception;
-#endif
+    internal static void ClearNextAction()
+    {
+        SetAction(0);
+        WrongAction = NextAction = NextGCDAction = null;
+    }
 
     internal static void UpdateNextAction()
     {
-
-        PlayerCharacter localPlayer = Service.ClientState.LocalPlayer;
-        if (localPlayer == null) return;
+        PlayerCharacter localPlayer = Player.Object;
+        var customRotation = RotationUpdater.RightNowRotation;
 
         try
         {
-            var customCombo = IconReplacer.RightNowRotation;
-
-            if (customCombo?.TryInvoke(out var newAction) ?? false)
+            if (localPlayer != null && customRotation != null
+                && customRotation.TryInvoke(out var newAction, out var gcdAction))
             {
+                if (Service.Config.GetValue(PluginConfigFloat.MistakeRatio) > 0)
+                {
+                    var actions = customRotation.AllActions.Where(a =>
+                    {
+                        if (a.ID == newAction?.ID) return false;
+                        if (a is IBaseAction action)
+                        {
+                            return !action.IsFriendly
+                            && action.ChoiceTarget != TargetFilter.FindTargetForMoving
+                            && action.CanUse(out _, CanUseOption.MustUseEmpty | CanUseOption.IgnoreClippingCheck);
+                        }
+                        return false;
+                    });
+                    WrongAction = actions.ElementAt(_wrongRandom.Next(actions.Count()));
+                }
+
                 NextAction = newAction;
+
+                if (gcdAction is IBaseAction GcdAction)
+                {
+                    if (NextGCDAction != GcdAction)
+                    {
+                        NextGCDAction = GcdAction;
+                    }
+                }
                 return;
             }
         }
-#if DEBUG
         catch (Exception ex)
         {
-            exception = ex;
+            PluginLog.Error(ex, "Failed to update next action.");
         }
-#else
-        catch { }
-#endif
 
-        NextAction = null;
+        CustomRotation.MoveTarget = null;
+        WrongAction = NextAction = NextGCDAction = null;
     }
+
+    private static void SetAction(uint id) => Svc.PluginInterface.GetOrCreateData("Avarice.ActionOverride", () => new List<uint>() { id })[0] = id;
 
     internal unsafe static void UpdateActionInfo()
     {
-        InCombat = Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.InCombat];
-
-        for (int i = 0; i < BluSlots.Length; i++)
-        {
-            BluSlots[i] = ActionManager.Instance()->GetActiveBlueMageActionInSlot(i);
-        }
+        SetAction(NextGCDAction?.AdjustedID ?? 0);
         UpdateWeaponTime();
-        UPdateMPTimer();
+        UpdateCombatTime();
+        UpdateSlots();
+        UpdateMoving();
+        UpdateMPTimer();
+    }
+    private unsafe static void UpdateSlots()
+    {
+        for (int i = 0; i < DataCenter.BluSlots.Length; i++)
+        {
+            DataCenter.BluSlots[i] = ActionManager.Instance()->GetActiveBlueMageActionInSlot(i);
+        }
+        for (ushort i = 0; i < DataCenter.DutyActions.Length; i++)
+        {
+            DataCenter.DutyActions[i] = ActionManager.GetDutyActionId(i);
+        }
+    }
+
+    static DateTime _stopMovingTime = DateTime.MinValue;
+    private unsafe static void UpdateMoving()
+    {
+        var last = DataCenter.IsMoving;
+        DataCenter.IsMoving = AgentMap.Instance()->IsPlayerMoving > 0;
+        if (last && !DataCenter.IsMoving)
+        {
+            _stopMovingTime = DateTime.Now;
+        }
+        else if (DataCenter.IsMoving)
+        {
+            _stopMovingTime = DateTime.MinValue;
+        }
+
+        if (_stopMovingTime == DateTime.MinValue)
+        {
+            DataCenter.StopMovingRaw = 0;
+        }
+        else
+        {
+            DataCenter.StopMovingRaw = (float)(DateTime.Now - _stopMovingTime).TotalSeconds;
+        }
+    }
+
+    static DateTime _startCombatTime = DateTime.MinValue;
+    private static void UpdateCombatTime()
+    {
+        var last = DataCenter.InCombat;
+        DataCenter.InCombat = Svc.Condition[ConditionFlag.InCombat];
+        if (!last && DataCenter.InCombat)
+        {
+            _startCombatTime = DateTime.Now;
+        }
+        else if (last && !DataCenter.InCombat)
+        {
+            _startCombatTime = DateTime.MinValue;
+            if (Service.Config.GetValue(PluginConfigFloat.AutoOffAfterCombat) > 0)
+            {
+                _cancelTime = DateTime.Now.AddSeconds(Service.Config.GetValue(PluginConfigFloat.AutoOffAfterCombat));
+            }
+        }
+
+        if (_startCombatTime == DateTime.MinValue)
+        {
+            DataCenter.CombatTimeRaw = 0;
+        }
+        else
+        {
+            DataCenter.CombatTimeRaw = (float)(DateTime.Now - _startCombatTime).TotalSeconds;
+        }
     }
 
     private static unsafe void UpdateWeaponTime()
     {
-        var player = Service.ClientState.LocalPlayer;
+        var player = Player.Object;
         if (player == null) return;
 
         var instance = ActionManager.Instance();
 
         var castTotal = player.TotalCastTime;
-        castTotal = castTotal > 2.5f ? castTotal + 0.1f : castTotal;
 
-        var weapontotal = instance->GetRecastTime(ActionType.Spell, 11);
-        if (player.IsCasting) weapontotal = Math.Max(weapontotal, castTotal);
+        var weaponTotal = instance->GetRecastTime(ActionType.Spell, 11);
+        if (castTotal > 0) castTotal += 0.1f;
+        if (player.IsCasting) weaponTotal = Math.Max(castTotal, weaponTotal);
 
-        WeaponElapsed = instance->GetRecastTimeElapsed(ActionType.Spell, 11);
-        WeaponRemain = Math.Max(weapontotal - WeaponElapsed, player.TotalCastTime - player.CurrentCastTime);
+        DataCenter.WeaponElapsed = instance->GetRecastTimeElapsed(ActionType.Spell, 11);
+        DataCenter.WeaponRemain = DataCenter.WeaponElapsed == 0 ? player.TotalCastTime - player.CurrentCastTime
+            : Math.Max(weaponTotal - DataCenter.WeaponElapsed, player.TotalCastTime - player.CurrentCastTime);
 
-        //确定读条时间。
-        if (WeaponElapsed < 0.3) _lastCastingTotal = castTotal;
-
-
-        //确认能力技的相关信息
-        var interval = Service.Configuration.WeaponInterval;
-        if (WeaponRemain < interval || WeaponElapsed == 0)
-        {
-            AbilityRemain = 0;
-            if (WeaponRemain > 0)
-            {
-                AbilityRemain = WeaponRemain + interval;
-            }
-            AbilityRemainCount = 0;
-        }
-        else if (WeaponRemain < 2 * interval)
-        {
-            AbilityRemain = WeaponRemain - interval;
-            AbilityRemainCount = 1;
-        }
-        else
-        {
-            var abilityWhole = (int)(weapontotal / Service.Configuration.WeaponInterval - 1);
-            AbilityRemain = interval - WeaponElapsed % interval;
-            AbilityRemainCount = (byte)(abilityWhole - (int)(WeaponElapsed / interval));
-        }
-
-        if (weapontotal > 0) WeaponTotal = weapontotal;
+        //Casting time.
+        if (DataCenter.WeaponElapsed < 0.3) DataCenter.CastingTotal = castTotal;
+        if (weaponTotal > 0 && DataCenter.WeaponElapsed > 0.2) DataCenter.WeaponTotal = weaponTotal;
     }
 
     static uint _lastMP = 0;
     static DateTime _lastMPUpdate = DateTime.Now;
-    /// <summary>
-    /// 跳蓝经过时间
-    /// </summary>
+
     internal static float MPUpdateElapsed => (float)(DateTime.Now - _lastMPUpdate).TotalSeconds % 3;
 
-    private static void UPdateMPTimer()
+    private static void UpdateMPTimer()
     {
-        var player = Service.ClientState.LocalPlayer;
+        var player = Player.Object;
         if (player == null) return;
 
         //不是黑魔不考虑啊
-        if (player.ClassJob.Id != 25) return;
+        if (player.ClassJob.Id != (uint)ECommons.ExcelServices.Job.BLM) return;
 
         //有醒梦，就算了啊
         if (player.HasStatus(true, StatusID.LucidDreaming)) return;
@@ -150,66 +196,60 @@ internal static class ActionUpdater
         _lastMP = player.CurrentMp;
     }
 
-    static DateTime _lastWeaponGo = DateTime.MinValue;
-    static float _weaponRandomDelay = -1;
-    internal static float _lastCastingTotal = 0;
-    internal unsafe static void DoAction()
+    internal unsafe static bool CanDoAction()
     {
-        if (Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.OccupiedInQuestEvent]
-            || Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.OccupiedInCutSceneEvent]
-            || Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.Occupied33]
-            || Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.Occupied38]
-            || Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.Jumping61]
-            || Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.BetweenAreas]
-            || Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.BetweenAreas51]
-            || Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.Mounted]
-            || Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.SufferingStatusAffliction]
-            || Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.SufferingStatusAffliction2]
-            || Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.RolePlaying]
-            || Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.InFlight]
-            //避免技能队列激活的时候反复按。
-            || *(bool*)((IntPtr)ActionManager.Instance() + 0x68)) return;
+        if (Svc.Condition[ConditionFlag.OccupiedInQuestEvent]
+            || Svc.Condition[ConditionFlag.OccupiedInCutSceneEvent]
+            || Svc.Condition[ConditionFlag.Occupied33]
+            || Svc.Condition[ConditionFlag.Occupied38]
+            || Svc.Condition[ConditionFlag.Jumping61]
+            || Svc.Condition[ConditionFlag.BetweenAreas]
+            || Svc.Condition[ConditionFlag.BetweenAreas51]
+            || Svc.Condition[ConditionFlag.Mounted]
+            //|| Svc.Condition[ConditionFlag.SufferingStatusAffliction] //Because of BLU30!
+            || Svc.Condition[ConditionFlag.SufferingStatusAffliction2]
+            || Svc.Condition[ConditionFlag.RolePlaying]
+            || Svc.Condition[ConditionFlag.InFlight]
+            ||  ActionManager.Instance()->ActionQueued && NextAction != null
+                && ActionManager.Instance()->QueuedActionId != NextAction.AdjustedID
+            || Player.Object.CurrentHp == 0) return false;
+
+        var maxAhead = Math.Max(DataCenter.MinAnimationLock - DataCenter.Ping, 0.08f);
+        var ahead = Math.Min(maxAhead, Service.Config.GetValue(PluginConfigFloat.ActionAhead));
 
         //GCD
-        if (WeaponRemain <= Service.Configuration.WeaponFaster)
+        var canUseGCD = DataCenter.WeaponRemain <= ahead;
+        if (_GCDDelay.Delay(canUseGCD))
         {
-            if(_weaponRandomDelay < 0)
-            {
-                Random ran = new Random(DateTime.Now.Millisecond);
-                _weaponRandomDelay = Service.Configuration.WeaponDelayMin + 
-                    (float)ran.NextDouble() * (Service.Configuration.WeaponDelayMax - Service.Configuration.WeaponDelayMin);
+            return RSCommands.CanDoAnAction(true);
+        }
+        if (canUseGCD) return false;
 
-                _lastWeaponGo = DateTime.Now;
-            }
-            else if ((DateTime.Now - _lastWeaponGo).TotalSeconds >= _weaponRandomDelay)
-            {
-                _weaponRandomDelay = -1;
-                RSCommands.DoAnAction(true);
-            }
-            return;
+        var nextAction = NextAction;
+        if (nextAction == null) return false;
+
+        var timeToNext = DataCenter.ActionRemain;
+
+        //No time to use 0gcd
+        if (timeToNext + nextAction.AnimationLockTime
+            > DataCenter.WeaponRemain) return false;
+
+        //Skip when casting
+        if (DataCenter.WeaponElapsed <= DataCenter.CastingTotal) return false;
+
+        //The last one.
+        if (timeToNext + nextAction.AnimationLockTime + DataCenter.Ping + DataCenter.MinAnimationLock > DataCenter.WeaponRemain)
+        {
+            if (DataCenter.WeaponRemain > nextAction.AnimationLockTime + ahead +
+                Math.Max(DataCenter.Ping, Service.Config.GetValue(PluginConfigFloat.MinLastAbilityAdvanced))) return false;
+
+            return RSCommands.CanDoAnAction(false);
+        }
+        else if (timeToNext < ahead)
+        {
+            return RSCommands.CanDoAnAction(false);
         }
 
-        //要超出GCD了，那就不放技能了。
-        if (WeaponRemain < Service.Configuration.WeaponInterval
-            || WeaponElapsed < Service.Configuration.WeaponInterval)
-        {
-            return;
-        }
-
-        //还在咏唱，就不放技能了。
-        if (WeaponElapsed <= _lastCastingTotal) return;
-
-        //只剩下最后一个能力技了，然后卡最后！
-        if (WeaponRemain < 2 * Service.Configuration.WeaponInterval)
-        {
-            if (WeaponRemain > Service.Configuration.WeaponInterval + Service.Configuration.WeaponFaster) return;
-            RSCommands.DoAnAction(false);
-
-            return;
-        }
-        else if ((WeaponElapsed - _lastCastingTotal) % Service.Configuration.WeaponInterval <= Service.Configuration.WeaponFaster)
-        {
-            RSCommands.DoAnAction(false);
-        }
+        return false;
     }
 }

@@ -1,90 +1,186 @@
-﻿using Dalamud.Game.ClientState.Objects.SubKinds;
-using RotationSolver.Actions.BaseAction;
-using RotationSolver.Data;
-using RotationSolver.Helpers;
-using RotationSolver.SigReplacers;
+﻿using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Logging;
+using ECommons.DalamudServices;
+using ECommons.GameHelpers;
+using RotationSolver.Localization;
+using RotationSolver.UI;
 using RotationSolver.Updaters;
-using System;
-using System.Runtime.InteropServices;
 
 namespace RotationSolver.Commands
 {
-    internal static partial class RSCommands
+    public static partial class RSCommands
     {
-        private static DateTime _fastClickStopwatch = DateTime.Now;
+        static DateTime _lastClickTime = DateTime.MinValue;
+        static bool _lastState;
 
-        internal static unsafe void DoAnAction(bool isGCD)
+        internal static unsafe bool CanDoAnAction(bool isGCD)
         {
-            if (StateType == StateCommandType.Cancel) return;
+            if (!_lastState || !DataCenter.State)
+            {
+                _lastState = DataCenter.State;
+                return false;
+            }
+            _lastState = DataCenter.State;
 
-            var localPlayer = Service.ClientState.LocalPlayer;
-            if (localPlayer == null) return;
+            if (!Player.Available) return false;
 
-            //0.2s内，不能重复按按钮。
-            if (DateTime.Now - _fastClickStopwatch < new TimeSpan(0, 0, 0, 0, 200)) return;
-            _fastClickStopwatch = DateTime.Now;
+            //Do not click the button in random time.
+            if (DateTime.Now - _lastClickTime < TimeSpan.FromMilliseconds(new Random().Next(
+                (int)(Service.Config.GetValue(Basic.Configuration.PluginConfigFloat.ClickingDelayMin) * 1000), (int)(Service.Config.GetValue(Basic.Configuration.PluginConfigFloat.ClickingDelayMax) * 1000)))) return  false;
+            _lastClickTime = DateTime.Now;
 
-            //Do Action
-            var nextAction = ActionUpdater.NextAction;
-#if DEBUG
-            //if(nextAction is BaseAction acti)
-            //Service.ChatGui.Print($"Will Do {acti} {ActionUpdater.WeaponElapsed}");
-#endif
+            if (!isGCD && ActionUpdater.NextAction is IBaseAction act1 && act1.IsRealGCD) return false;
+
+            return true;
+        }
+        internal static DateTime _lastUsedTime = DateTime.MinValue;
+        internal static uint _lastActionID;
+        public static void DoAction()
+        {
+            var wrong = new Random().NextDouble() < Service.Config.GetValue(Basic.Configuration.PluginConfigFloat.MistakeRatio) && ActionUpdater.WrongAction != null;
+            var nextAction = wrong ? ActionUpdater.WrongAction : ActionUpdater.NextAction;
             if (nextAction == null) return;
-            if (!isGCD && nextAction is BaseAction act1 && act1.IsRealGCD) return;
+
+            if (wrong)
+            {
+                Svc.Toasts.ShowError(string.Format(LocalizationManager.RightLang.ClickingMistakeMessage, nextAction));
+                ControlWindow.Wrong = nextAction;
+                ControlWindow.DidTime = DateTime.Now;
+            }
+
+#if DEBUG
+            //if (nextAction is BaseAction acti)
+            //    Svc.Chat.Print($"Will Do {acti}");
+#endif
+
+            if (Service.Config.GetValue(Basic.Configuration.PluginConfigBool.KeyBoardNoise))
+            {
+                PreviewUpdater.PulseActionBar(nextAction.AdjustedID);
+            }
 
             if (nextAction.Use())
             {
-                if (Service.Configuration.KeyBoardNoise) PreviewUpdater.PulseAtionBar(nextAction.AdjustedID);
+                _lastActionID = nextAction.AdjustedID;
+                _lastUsedTime = DateTime.Now;
+
                 if (nextAction is BaseAction act)
                 {
+                    if (Service.Config.GetValue(Basic.Configuration.PluginConfigBool.KeyBoardNoise))
+                        Task.Run(() => PulseSimulation(nextAction.AdjustedID));
+
+                    if (act.ShouldEndSpecial) ResetSpecial();
 #if DEBUG
-                    //Service.ChatGui.Print($"{act}, {act.Target.Name}, {ActionUpdater.AbilityRemainCount}, {ActionUpdater.WeaponElapsed}");
+                    //Svc.Chat.Print($"{act}, {act.Target.Name}, {ActionUpdater.AbilityRemainCount}, {ActionUpdater.WeaponElapsed}");
 #endif
                     //Change Target
-                    if (Service.TargetManager.Target is not PlayerCharacter && (act.Target?.CanAttack() ?? false))
+                    if (act.Target != null && (Service.Config.GetValue(Basic.Configuration.PluginConfigBool.SwitchTargetFriendly) && !DataCenter.IsManual || ((Svc.Targets.Target?.IsNPCEnemy() ?? true)
+                        || Svc.Targets.Target?.GetObjectKind() == Dalamud.Game.ClientState.Objects.Enums.ObjectKind.Treasure)
+                        && act.Target.IsNPCEnemy()))
                     {
-                        Service.TargetManager.SetTarget(act.Target);
+                        Svc.Targets.Target = act.Target;
                     }
                 }
             }
-            return;
         }
 
+        static bool started = false;
+        static async void PulseSimulation(uint id)
+        {
+            if (started) return;
+            started = true;
+            try
+            {
+                for (int i = 0; i < new Random().Next(Service.Config.GetValue(Basic.Configuration.PluginConfigInt.KeyBoardNoiseMin),
+                    Service.Config.GetValue(Basic.Configuration.PluginConfigInt.KeyBoardNoiseMax)); i++)
+                {
+                    PreviewUpdater.PulseActionBar(id);
+                    var time = Service.Config.GetValue(Basic.Configuration.PluginConfigFloat.ClickingDelayMin) + 
+                        new Random().NextDouble() * (Service.Config.GetValue(Basic.Configuration.PluginConfigFloat.ClickingDelayMax) - Service.Config.GetValue(Basic.Configuration.PluginConfigFloat.ClickingDelayMin));
+                    await Task.Delay((int)(time * 1000));
+                }
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning(ex, "Pulse Failed!");
+            }
+            finally { started = false; }
+            started = false;
+        }
+
+        internal static void ResetSpecial()
+        {
+            DoSpecialCommandType(SpecialCommandType.EndSpecial, false);
+        }
+        private static void CancelState()
+        {
+            if (DataCenter.State) DoStateCommandType(StateCommandType.Cancel);
+        }
+
+        static float _lastCountdownTime = 0;
         internal static void UpdateRotationState()
         {
-            //结束战斗，那就关闭。
-            if (Service.ClientState.LocalPlayer.CurrentHp == 0
-                || Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.LoggingOut]
-                || Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.OccupiedInCutSceneEvent]
-                || Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.BetweenAreas]
-                || Service.Conditions[Dalamud.Game.ClientState.Conditions.ConditionFlag.BetweenAreas51])
-                StateType = StateCommandType.Cancel;
-
-            //Auto start at count Down.
-            else if (Service.Configuration.StartOnCountdown && CountDown.CountDownTime > 0)
+            if(ActionUpdater._cancelTime != DateTime.MinValue && 
+                (!DataCenter.State || DataCenter.InCombat))
             {
-                if (StateType == StateCommandType.Cancel) StateType = StateCommandType.Smart;
+                ActionUpdater._cancelTime = DateTime.MinValue;
             }
-        }
 
-        /// <summary>
-        /// Submit text/command to outgoing chat.
-        /// Can be used to enter chat commands.
-        /// </summary>
-        /// <param name="text">Text to submit.</param>
-        public unsafe static void SubmitToChat(string text)
-        {
-            IntPtr uiModule = Service.GameGui.GetUIModule();
+            var target = DataCenter.AllHostileTargets.FirstOrDefault(t => t.TargetObjectId == Player.Object.ObjectId);
 
-            using (ChatPayload payload = new ChatPayload(text))
+            if (Svc.Condition[ConditionFlag.LoggingOut])
             {
-                IntPtr mem1 = Marshal.AllocHGlobal(400);
-                Marshal.StructureToPtr(payload, mem1, false);
-
-                Service.Address.GetChatBox(uiModule, mem1, IntPtr.Zero, 0);
-
-                Marshal.FreeHGlobal(mem1);
+                CancelState();
+            }
+            else if (Service.Config.GetValue(Basic.Configuration.PluginConfigBool.AutoOffWhenDead)
+                && Player.Available
+                && Player.Object.CurrentHp == 0)
+            {
+                CancelState();
+            }
+            else if (Service.Config.GetValue(Basic.Configuration.PluginConfigBool.AutoOffCutScene)
+                && Svc.Condition[ConditionFlag.OccupiedInCutSceneEvent])
+            {
+                CancelState();
+            }
+            else if (Service.Config.GetValue(Basic.Configuration.PluginConfigBool.AutoOffBetweenArea) 
+                && (
+                Svc.Condition[ConditionFlag.BetweenAreas]
+                || Svc.Condition[ConditionFlag.BetweenAreas51]))
+            {
+                CancelState();
+            }
+            //Cancel when pull
+            else if (Service.CountDownTime == 0 && _lastCountdownTime > 0.2f)
+            {
+                _lastCountdownTime = 0;
+                CancelState();
+            }
+            //Auto manual on being attacked by someone.
+            else if (Service.Config.GetValue(Basic.Configuration.PluginConfigBool.StartOnAttackedBySomeone)
+                && target != null
+                && !target.IsDummy())
+            {
+                if(!DataCenter.State)
+                {
+                    DoStateCommandType(StateCommandType.Manual);
+                }
+            }
+            //Auto start at count Down.
+            else if (Service.Config.GetValue(Basic.Configuration.PluginConfigBool.StartOnCountdown)
+                && Service.CountDownTime > 0)
+            {
+                _lastCountdownTime = Service.CountDownTime;
+                if (!DataCenter.State)
+                {
+                    DoStateCommandType(StateCommandType.Auto);
+                }
+            }
+            //Cancel when after combat.
+            else if (ActionUpdater._cancelTime != DateTime.MinValue
+                && DateTime.Now > ActionUpdater._cancelTime)
+            {
+                CancelState();
+                ActionUpdater._cancelTime = DateTime.MinValue;
             }
         }
     }

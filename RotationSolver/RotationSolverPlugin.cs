@@ -1,65 +1,98 @@
-//本插件不得以任何形式在国服中使用。
-
+using Clipper2Lib;
+using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Game.Text.SeStringHandling.Payloads;
 using Dalamud.Interface.Windowing;
+using Dalamud.Logging;
 using Dalamud.Plugin;
+using ECommons;
+using ECommons.DalamudServices;
+using ECommons.GameHelpers;
+using ECommons.ImGuiMethods;
+using RotationSolver.Basic.Configuration;
 using RotationSolver.Commands;
-using RotationSolver.Configuration;
 using RotationSolver.Data;
+using RotationSolver.Helpers;
 using RotationSolver.Localization;
-using RotationSolver.SigReplacers;
+using RotationSolver.UI;
 using RotationSolver.Updaters;
-using RotationSolver.Windows;
-using RotationSolver.Windows.RotationConfigWindow;
-using System;
-using System.IO;
+using Module = ECommons.Module;
 
 namespace RotationSolver;
 
 public sealed class RotationSolverPlugin : IDalamudPlugin, IDisposable
 {
-    internal static string TimelineFolder { get; private set; }
-
     private readonly WindowSystem windowSystem;
 
-    private static RotationConfigWindow _comboConfigWindow;
+    static RotationConfigWindow _rotationConfigWindow;
+    static ControlWindow _controlWindow;
+    static NextActionWindow _nextActionWindow;
+    static CooldownWindow _cooldownWindow;
+
+    static readonly List<IDisposable> _dis = new();
     public string Name => "Rotation Solver";
 
+    public static DalamudLinkPayload OpenLinkPayload { get; private set; }
     public RotationSolverPlugin(DalamudPluginInterface pluginInterface)
     {
-        pluginInterface.Create<Service>();
-        Service.Configuration = pluginInterface.GetPluginConfig() as PluginConfiguration ?? new PluginConfiguration();
-        Service.Address = new PluginAddressResolver();
-        Service.Address.Setup();
+        ECommonsMain.Init(pluginInterface, this, Module.DalamudReflector, Module.ObjectFunctions);
+        ThreadLoadImageHandler.TryGetIconTextureWrap(0, false, out _);
+        IconSet.InIt();
 
-        TimelineFolder = Path.Combine(pluginInterface.ConfigDirectory.FullName, "Timeline");
-        if(!Directory.Exists(TimelineFolder)) Directory.CreateDirectory(TimelineFolder);
+        //Init!
+        Clipper.InflatePaths(new PathsD(new PathD[] { Clipper.MakePath(new double[] {0, 0, 1, 1 }) }), 0, JoinType.Round, EndType.Joined);
 
-        Service.IconReplacer = new IconReplacer();
+        _dis.Add(new Service());
+        try
+        {
+            Service.Config = JsonConvert.DeserializeObject<PluginConfig>(
+                File.ReadAllText(Svc.PluginInterface.ConfigFile.FullName)) 
+                ?? PluginConfig.Create();
+        }
+        catch(Exception ex)
+        {
+            PluginLog.Warning(ex, "Failed to load config");
+            Service.Config = PluginConfig.Create(); ;
+        }
 
-        _comboConfigWindow = new();
+        _rotationConfigWindow = new();
+        _controlWindow = new();
+        _nextActionWindow = new();
+        _cooldownWindow = new();
+
         windowSystem = new WindowSystem(Name);
-        windowSystem.AddWindow(_comboConfigWindow);
+        windowSystem.AddWindow(_rotationConfigWindow);
+        windowSystem.AddWindow(_controlWindow);
+        windowSystem.AddWindow(_nextActionWindow);
+        windowSystem.AddWindow(_cooldownWindow);
 
-        Service.Interface.UiBuilder.OpenConfigUi += OnOpenConfigUi;
-        Service.Interface.UiBuilder.Draw += windowSystem.Draw;
-        Service.Interface.UiBuilder.Draw += OverlayWindow.Draw;
+        Svc.PluginInterface.UiBuilder.OpenConfigUi += OnOpenConfigUi;
+        Svc.PluginInterface.UiBuilder.Draw += windowSystem.Draw;
 
+        PainterManager.Init();
         MajorUpdater.Enable();
         Watcher.Enable();
-        CountDown.Enable();
-
-
-        Service.Localization = new LocalizationManager();
+        OtherConfiguration.Init();
+        _dis.Add(new LocalizationManager());
 #if DEBUG
-        Service.Localization.ExportLocalization();
+        LocalizationManager.ExportLocalization();
 #endif
+        ChangeUITranslation();
 
-        ChangeWindowHeader();
+        OpenLinkPayload = pluginInterface.AddChatLinkHandler(0, (id, str) =>
+        {
+            if (id == 0) OpenConfigWindow();
+        });
+
+        Task.Run(async () =>
+        {
+            await DownloadHelper.DownloadAsync();
+            await RotationUpdater.GetAllCustomRotationsAsync(DownloadOption.Download);
+        });
     }
 
-    internal static void ChangeWindowHeader()
+    internal static void ChangeUITranslation()
     {
-        _comboConfigWindow.WindowName = LocalizationManager.RightLang.ConfigWindow_Header
+        _rotationConfigWindow.WindowName = LocalizationManager.RightLang.ConfigWindow_Header
             + typeof(RotationConfigWindow).Assembly.GetName().Version.ToString();
 
         RSCommands.Disable();
@@ -69,27 +102,58 @@ public sealed class RotationSolverPlugin : IDalamudPlugin, IDisposable
     public void Dispose()
     {
         RSCommands.Disable();
-        Service.Interface.UiBuilder.OpenConfigUi -= OnOpenConfigUi;
-        Service.Interface.UiBuilder.Draw -= windowSystem.Draw;
-        Service.Interface.UiBuilder.Draw -= OverlayWindow.Draw;
-        Service.IconReplacer.Dispose();
+        Watcher.Disable();
 
-        Service.Localization.Dispose();
+        Svc.PluginInterface.UiBuilder.OpenConfigUi -= OnOpenConfigUi;
+        Svc.PluginInterface.UiBuilder.Draw -= windowSystem.Draw;
+
+        foreach (var item in _dis)
+        {
+            item.Dispose();
+        }
+        _dis?.Clear();
 
         MajorUpdater.Dispose();
-        Watcher.Dispose();
-        CountDown.Dispose();
+        PainterManager.Dispose();
+        OtherConfiguration.Save();
 
-        IconSet.Dispose();
+        ECommonsMain.Dispose();
+
+#if DEBUG
+#else
+        Service.Config.Save();
+#endif
     }
 
     private void OnOpenConfigUi()
     {
-        _comboConfigWindow.IsOpen = true;
+        _rotationConfigWindow.IsOpen = true;
     }
 
     internal static void OpenConfigWindow()
     {
-        _comboConfigWindow.Toggle();
+        _rotationConfigWindow.Toggle();
+    }
+
+    static RandomDelay validDelay = new(() => (0.2f, 0.2f));
+
+    internal static void UpdateDisplayWindow()
+    {
+        var isValid = validDelay.Delay(MajorUpdater.IsValid
+            && RotationUpdater.RightNowRotation != null
+            && !Svc.Condition[ConditionFlag.OccupiedInCutSceneEvent]
+            && !Svc.Condition[ConditionFlag.Occupied38] //Treasure hunt.
+            && !Svc.Condition[ConditionFlag.WaitingForDuty]
+            && (!Svc.Condition[ConditionFlag.UsingParasol] || Player.Object.StatusFlags.HasFlag(Dalamud.Game.ClientState.Objects.Enums.StatusFlags.WeaponOut))
+            && !Svc.Condition[ConditionFlag.OccupiedInQuestEvent]);
+
+        _nextActionWindow.IsOpen = isValid && Service.Config.GetValue(PluginConfigBool.ShowNextActionWindow);
+
+        isValid &= !Service.Config.GetValue(PluginConfigBool.OnlyShowWithHostileOrInDuty)
+                || Svc.Condition[ConditionFlag.BoundByDuty]
+                || DataCenter.AllHostileTargets.Any(o => o.DistanceToPlayer() <= 25);
+
+        _controlWindow.IsOpen = isValid && Service.Config.GetValue(PluginConfigBool.ShowControlWindow);
+        _cooldownWindow.IsOpen = isValid && Service.Config.GetValue(PluginConfigBool.ShowCooldownWindow);
     }
 }

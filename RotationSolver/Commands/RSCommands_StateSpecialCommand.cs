@@ -1,78 +1,83 @@
-﻿using Lumina.Excel.GeneratedSheets;
-using RotationSolver.Data;
+﻿using ECommons.DalamudServices;
+using ECommons.GameHelpers;
 using RotationSolver.Localization;
-using RotationSolver.SigReplacers;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using RotationSolver.Updaters;
 
-namespace RotationSolver.Commands
+namespace RotationSolver.Commands;
+
+public static partial class RSCommands
 {
-    internal static partial class RSCommands
+    private static string _stateString = "Off", _specialString = string.Empty;
+
+    internal static string EntryString => _stateString + (DataCenter.SpecialTimeLeft < 0 ? string.Empty : $" - {_specialString}: {DataCenter.SpecialTimeLeft:F2}s");
+
+    private static void UpdateToast()
     {
-        private static DateTime _specialStateStartTime = DateTime.MinValue;
-        private static double SpecialTimeLeft => Service.Configuration.SpecialDuration - (DateTime.Now - _specialStateStartTime).TotalSeconds;
+        if (!Service.Config.GetValue(Basic.Configuration.PluginConfigBool.ShowInfoOnToast)) return;
 
-        private static SpecialCommandType _specialType = SpecialCommandType.EndSpecial;
-        internal static SpecialCommandType SpecialType =>
-             SpecialTimeLeft < 0 ? SpecialCommandType.EndSpecial : _specialType;
-
-        internal static StateCommandType StateType { get; private set; } = StateCommandType.Cancel;
-
-
-        private static string _stateString = "Off", _specialString = string.Empty;
-        internal static string EntryString =>
-            _stateString + (SpecialTimeLeft < 0 ? string.Empty : $" - {_specialString}: {SpecialTimeLeft:F2}s");
-
-        private static void UpdateToast()
+        Svc.Toasts.ShowQuest(" " + EntryString, new Dalamud.Game.Gui.Toast.QuestToastOptions()
         {
-            if (!Service.Configuration.ShowInfoOnToast) return;
+            IconId = 101,
+        });
+    }
 
-            Service.ToastGui.ShowQuest(" " + EntryString, new Dalamud.Game.Gui.Toast.QuestToastOptions()
-            {
-                IconId = 101,
-            });
+    private static unsafe void DoStateCommandType(StateCommandType stateType) => DoOneCommandType(EnumTranslations.ToSayout, role =>
+    {
+        if (DataCenter.State && !DataCenter.IsManual
+            && stateType == StateCommandType.Auto)
+        {
+            var index = Service.Config.GetValue(Basic.Configuration.PluginConfigInt.TargetingIndex) + 1; 
+            index %= Service.Config.GlobalConfig.TargetingTypes.Count;
+            Service.Config.SetValue(Basic.Configuration.PluginConfigInt.TargetingIndex, index);
+            ActionUpdater._cancelTime = DateTime.MinValue;
         }
 
-        internal static void ResetSpecial() => DoSpecialCommandType(SpecialCommandType.EndSpecial, false);
-
-        private static void DoStateCommandType(StateCommandType stateType) => DoOneCommandType(stateType, EnumTranslations.ToSayout, role =>
+        if (Service.Config.GetValue(Basic.Configuration.PluginConfigBool.ToggleManual)
+            && DataCenter.State && DataCenter.IsManual
+            && stateType == StateCommandType.Manual)
         {
-            if (StateType == StateCommandType.Smart
-            && stateType == StateCommandType.Smart)
-            {
-                Service.Configuration.TargetingIndex += 1;
-                Service.Configuration.TargetingIndex %= Service.Configuration.TargetingTypes.Count;
-            }
-
-            StateType = stateType;
-
-            _stateString = stateType.ToStateString(role);
-            UpdateToast();
-        });
-
-        private static void DoSpecialCommandType(SpecialCommandType specialType, bool sayout = true) => DoOneCommandType(specialType, sayout ? EnumTranslations.ToSayout : (s, r) => string.Empty, role =>
-        {
-            _specialType = specialType;
-            _specialString = specialType.ToSpecialString(role);
-
-            _specialStateStartTime = specialType == SpecialCommandType.EndSpecial ? DateTime.MinValue : DateTime.Now;
-            if(sayout) UpdateToast();
-        });
-
-        private static void DoOneCommandType<T>(T type, Func<T, JobRole, string> sayout, Action<JobRole> doingSomething)
-            where T : struct, Enum
-        {
-            //Get jobrole.
-            var role = Service.DataManager.GetExcelSheet<ClassJob>().GetRow(
-                Service.ClientState.LocalPlayer.ClassJob.Id).GetJobRole();
-
-            //Saying out.
-            if (Service.Configuration.SayOutStateChanged) Watcher.Speak(sayout(type, role));
-
-            doingSomething(role);
+            stateType = StateCommandType.Cancel;
         }
+
+        switch (stateType)
+        {
+            case StateCommandType.Cancel:
+                DataCenter.State = false;
+                break;
+
+            case StateCommandType.Auto:
+                DataCenter.IsManual = false;
+                DataCenter.State = true;
+                break;
+
+            case StateCommandType.Manual:
+                DataCenter.IsManual = true;
+                DataCenter.State = true;
+                break;
+        }
+
+        _stateString = stateType.ToStateString(role);
+        UpdateToast();
+        return stateType;
+    });
+
+    private static void DoSpecialCommandType(SpecialCommandType specialType, bool sayout = true) => DoOneCommandType(sayout ? EnumTranslations.ToSayout : (s, r) => string.Empty, role =>
+    {
+        _specialString = specialType.ToSpecialString(role);
+        DataCenter.SetSpecialType(specialType);
+        if (sayout) UpdateToast();
+        return specialType;
+    });
+
+    private static void DoOneCommandType<T>(Func<T, JobRole, string> sayout, Func<JobRole, T> doingSomething)
+        where T : struct, Enum
+    {
+        //Get job role.
+        var role = Player.Object.ClassJob.GameData.GetJobRole();
+
+        T type = doingSomething(role);
+
+        //Saying out.
+        if (Service.Config.GetValue(Basic.Configuration.PluginConfigBool.SayOutStateChanged)) SpeechHelper.Speak(sayout(type, role));
     }
 }

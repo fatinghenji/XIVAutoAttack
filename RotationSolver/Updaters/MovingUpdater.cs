@@ -1,60 +1,71 @@
 ﻿using Dalamud.Game.ClientState.Conditions;
-using Dalamud.Hooking;
-using RotationSolver;
-using RotationSolver.Data;
-using RotationSolver.Helpers;
-using System;
-using System.Numerics;
+using ECommons.DalamudServices;
+using ECommons.GameHelpers;
+using FFXIVClientStructs.FFXIV.Client.Game;
+using RotationSolver.Commands;
 
 namespace RotationSolver.Updaters;
 
 internal static class MovingUpdater
 {
-    private static bool _posLocker = false;
-    private static Hook<MovingControllerDelegate> movingHook;
-    private delegate bool MovingControllerDelegate(IntPtr ptr);
-    internal static void Enable()
+    internal unsafe static void UpdateCanMove(bool doNextAction)
     {
-        movingHook ??= Hook<MovingControllerDelegate>.FromAddress(Service.Address.MovingController, new MovingControllerDelegate(MovingDetour));
-        movingHook.Enable();
-    }
-    internal static void Dispose()
-    {
-        movingHook.Disable();
-    }
-
-    internal static void UpdateLocation()
-    {
-        if (Service.ClientState.LocalPlayer == null) return;
-        var p = Service.ClientState.LocalPlayer.Position;
-
-        _moving = _lastPosition != p;
-        _lastPosition = p;
-
-        if (Service.ClientState.LocalPlayer.HasStatus(true, StatusID.TenChiJin)) IsMoving = false;
-
-    }
-
-    private static bool MovingDetour(IntPtr ptr)
-    {
-        if (Service.Conditions[ConditionFlag.OccupiedInEvent])
-            return movingHook.Original(ptr);
-
-        if (Service.Configuration.PoslockCasting && _posLocker)
+        //Special state.
+        if (Svc.Condition[ConditionFlag.OccupiedInEvent])
         {
-            //没有键盘取消
-            if (!Service.KeyState[ConfigurationHelper.Keys[Service.Configuration.PoslockModifier]]
-              //也没有手柄取消
-              && Service.GamepadState.Raw(Dalamud.Game.ClientState.GamePad.GamepadButtons.L2) <= 0.5f) return false;
+            Service.CanMove = true;
         }
-        return movingHook.Original(ptr);
-    }
+        //Casting the action in list.
+        else if (Svc.Condition[ConditionFlag.Casting] && Player.Available && Enum.IsDefined((ActionID)Player.Object.CastActionId)) 
+        {
+            Service.CanMove = false;
+        }
+        //Not in combat.
+        else if (!DataCenter.InCombat)
+        {
+            Service.CanMove = true;
+        }
+        //Special actions.
+        else
+        {
+            var canMove = !Svc.Condition[ConditionFlag.Casting];
 
-    static Vector3 _lastPosition = Vector3.Zero;
-    static bool _moving = false;
-    internal static bool IsMoving
-    {
-        get => _moving;
-        set => _posLocker = !value;
+            var statusList = new List<StatusID>(4);
+            var actionList = new List<ActionID>(4);
+
+            if (Service.Config.GetValue(Basic.Configuration.PluginConfigBool.PosFlameThrower))
+            {
+                statusList.Add(StatusID.Flamethrower);
+                actionList.Add(ActionID.FlameThrower);
+            }
+            if (Service.Config.GetValue(Basic.Configuration.PluginConfigBool.PosTenChiJin))
+            {
+                statusList.Add(StatusID.TenChiJin);
+                actionList.Add(ActionID.TenChiJin);
+            }
+            if (Service.Config.GetValue(Basic.Configuration.PluginConfigBool.PosPassageOfArms))
+            {
+                statusList.Add(StatusID.PassageOfArms);
+                actionList.Add(ActionID.PassageOfArms);
+            }
+            if (Service.Config.GetValue(Basic.Configuration.PluginConfigBool.PosImprovisation))
+            {
+                statusList.Add(StatusID.Improvisation);
+                actionList.Add(ActionID.Improvisation);
+            }
+
+            //Action
+            var action = DateTime.Now - RSCommands._lastUsedTime < TimeSpan.FromMilliseconds(100)
+                ? (ActionID)RSCommands._lastActionID
+                : doNextAction ? (ActionID)(ActionUpdater.NextAction?.AdjustedID ?? 0) : 0;
+
+            var specialActions = ActionManager.GetAdjustedCastTime(ActionType.Spell, (uint)action) > 0
+                || actionList.Any(id => Service.GetAdjustedActionId(id) == action);
+
+            //Status
+            var specialStatus = Player.Object.HasStatus(true, statusList.ToArray());
+
+            Service.CanMove = !specialStatus && !specialActions && canMove;
+        }
     }
 }

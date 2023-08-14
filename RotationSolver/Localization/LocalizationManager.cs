@@ -1,9 +1,5 @@
 ﻿using Dalamud.Logging;
-using Newtonsoft.Json;
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Reflection;
+using ECommons.DalamudServices;
 
 namespace RotationSolver.Localization;
 
@@ -11,7 +7,7 @@ internal class LocalizationManager : IDisposable
 {
     public static Strings RightLang { get; private set; } = new Strings();
 
-    private readonly Dictionary<string, Strings> _translations = new Dictionary<string, Strings>();
+    private readonly Dictionary<string, Strings> _translations = new();
     public LocalizationManager()
     {
         var assembly = Assembly.GetCallingAssembly();
@@ -21,15 +17,15 @@ internal class LocalizationManager : IDisposable
             ReadFile(lang, assembly);
         }
 
-        SetLanguage(Service.Interface.UiLanguage);
-        Service.Interface.LanguageChanged += OnLanguageChange;
+        SetLanguage(Svc.PluginInterface.UiLanguage);
+        Svc.PluginInterface.LanguageChanged += OnLanguageChange;
     }
 
     private void ReadFile(string lang, Assembly assembly)
     {
-        Stream manifestResourceStream = assembly.GetManifestResourceStream("XIVAutoAction.Localization." + lang + ".json");
+        Stream manifestResourceStream = assembly.GetManifestResourceStream("RotationSolver.Localization." + lang + ".json");
         if (manifestResourceStream == null) return;
-        using StreamReader streamReader = new StreamReader(manifestResourceStream);
+        using StreamReader streamReader = new(manifestResourceStream);
         _translations[lang] = JsonConvert.DeserializeObject<Strings>(streamReader.ReadToEnd());
     }
 
@@ -44,13 +40,13 @@ internal class LocalizationManager : IDisposable
             RightLang = new Strings();
         }
 
-        RotationSolverPlugin.ChangeWindowHeader();
+        RotationSolverPlugin.ChangeUITranslation();
     }
 
 #if DEBUG
-    public void ExportLocalization()
+    public static void ExportLocalization()
     {
-        var directory = @"D:\FFXIV_INT\XIVAutoAction\XIVAutoAction\Localization";
+        var directory = @"E:\OneDrive - stu.zafu.edu.cn\PartTime\FFXIV\RotationSolver\RotationSolver\Localization";
         if (!Directory.Exists(directory)) return;
 
         //Default values.
@@ -61,7 +57,7 @@ internal class LocalizationManager : IDisposable
 
     public void Dispose()
     {
-        Service.Interface.LanguageChanged -= OnLanguageChange;
+        Svc.PluginInterface.LanguageChanged -= OnLanguageChange;
     }
 
     private void OnLanguageChange(string languageCode)

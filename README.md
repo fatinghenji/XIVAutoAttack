@@ -1,5 +1,5 @@
 
-# [![](docs/RotationSolverIcon_128.png)](https://archidog1998.github.io/RotationSolver/#/) **Rotation Solver**
+# [![](Images/Logo.gif)](https://archidog1998.github.io/RotationSolver/#/) **Rotation Solver**
 
 ![Github Latest Releases](https://img.shields.io/github/downloads/ArchiDog1998/RotationSolver/latest/total.svg?style=for-the-badge)
 ![Github All Releases](https://img.shields.io/github/downloads/ArchiDog1998/RotationSolver/total.svg?style=for-the-badge)
@@ -7,53 +7,59 @@
 ![Github License](https://img.shields.io/github/license/ArchiDog1998/RotationSolver.svg?label=License&style=for-the-badge)
 ![Github Commits](https://img.shields.io/github/commits-since/ArchiDog1998/RotationSolver/latest/main?style=for-the-badge)
 
+Download it at this url:
 
-
-**It will probably have distributions in `game version 6.4`，and only supports international servers.**
-
-There are several reasons why I don't want to distribute this plugin right now.
-
-1. I moved from Chinese Server to Japanese Data Center. So I need some time to adjust to the new environment and grow the new character.
-2. This repository's framework is a little bit strange right now. I need to tidy up these codes and refactor the architecture.
-3. I have a lot of work to do, such as industrial software research and damn IELTS.
-4. I am not a major in software engineering, so I need to learn some soft engineering knowledge.
-5. I want to enjoy the game for a while.
+```
+https://raw.githubusercontent.com/ArchiDog1998/Dalamud_Plugins/main/pluginmaster.json
+```
 
 ## Brief
 
-> Based on the pve combat information in one frame, find the best action.
+> Analyses PvE combat information every frame and finds the best action.
 
-The `information` is almost all the information available in one frame in combat, including the status of the all players in party, the status of the hostile targets, action cooling, the number of action stack, the MP and HP of characters, the location of characters, casting action of the hostile target, combo ID, combat duration, player level, etc. In this case, opener is also a kind of information that a lot of abilities are not cooling down.
+This means almost all the information available in one frame in combat, including the status of all players in the party, the status of any hostile targets, skill cooldowns, the MP and HP of characters, the location of characters, casting status of the hostile target, combo, combat duration, player level, etc.
 
-Then, it will highlight the best action one the hot bar, or help you to click on it.
+Then, it will highlight the best action on the hot bar, or help you to click on it.
 
-It is designed for `general combat`, not for savage or ultimate. So use it carefully.
+It is designed for `general combat`, not for savage or ultimate. Use it carefully.
 
-## Concept
+## Compatibility
 
-I have to admit, I'm not a good arpg player. But I enjoy the experience of FFXIV. So I want to design a plugin that can improve my gaming experience without affecting other player's gaming experience. So there goes to `Rotation Solver`. 
+literally, `Rotation Solver` helps you to choose the target and then click the action. So any plugin that changes these will affect its decision. 
 
-I have to admit, it does have an automatic component, which might not good for some player. But it can NOT affect any other player's game experience. pvp is absolutely NOT allowed in this plugin.
+- [XIVCombo](https://github.com/daemitus/XIVComboPlugin)
+- [ReAction](https://github.com/UnknownX7/ReAction)
+- etc...
+
+NOTICE: It can't use with [`Block Targeting Treasure Hunt Enemies`](https://github.com/Caraxi/SimpleTweaksPlugin/blob/7e94915afa17ea873d48be2c469ebdaddd2e5200/Tweaks/TreasureHuntTargets.cs) in [Simple Tweaks](https://github.com/Caraxi/SimpleTweaksPlugin). 
+
+I don't know why. I just used the [GetIsTargetable](https://github.com/aers/FFXIVClientStructs/blob/c554a586c4649a472433734b45c59a4bc4979ead/FFXIVClientStructs/FFXIV/Client/Game/Object/GameObject.cs#L71) Method in [FFXIVClientStructs](https://github.com/aers/FFXIVClientStructs). If anybody knows why, please tell me.
+
 
 ## Links
 
-If you have any questions about usage, please check the [Wiki](https://archidog1998.github.io/RotationSolver/#/). Wiki is NOT ready yet...
+If you have any questions about usage, please check the [Wiki](https://archidog1998.github.io/RotationSolver/#/).
+
+The rotations definitions are [here](https://github.com/ArchiDog1998/FFXIVRotations)
 
 [![Discord](https://discordapp.com/api/guilds/1064448004498653245/embed.png?style=banner2)](https://discord.gg/4fECHunam9)
 
-[![Crowdin](https://badges.crowdin.net/badge/light/crowdin-on-dark.png)](https://crowdin.com/project/rotationsolver)Please do NOT translate right now. It will change a lot...
+[![Crowdin](https://badges.crowdin.net/badge/light/crowdin-on-dark.png)](https://crowdin.com/project/rotationsolver)
 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/B0B0IN5DX)
 
 ## 对于国服用户
 
 > 这个库已经不再维护了。
->
-> 本插件不得以任何形式在国服中使用。
+
+想要了解更多，可以参考这个[网页](https://archidog1998.github.io/RotationSolver/#/ChineseServer/)。
 
 ### 声明
 本仓库使用的是[GPL v3.0](https://www.gnu.org/licenses/gpl-3.0.en.html)协议，任何人均享有自由分发软件的自由。详看[原文](https://github.com/ArchiDog1998/XIVAutoAction/blob/main/LICENSE#L23-L27)。请所有使用本仓库的作者遵循此协议。
 
 > 不能限制任何人自由分发此软件，不论是否收费！如已有限制，请删除！
+
+该链接为个人研发的最后一版的源代码[AutoAttack](https://github.com/ArchiDog1998/RotationSolver/tree/1e28211c8b447423f8e11cd3126ae1aa1ef08dc6)
 
 ### 插件简要历程
 
@@ -71,7 +77,7 @@ If you have any questions about usage, please check the [Wiki](https://archidog1
 ### 添加url的原因
 
 - 期望有足够多人能够一起维护这个插件
-- 让我这个手残玩家能用自己写的插件完整的体验一下高难本。
+- 让我这个手残玩家能用自己写的插件完整的体验一下极神副本。
 
 2022.10时有了某位玩家的热情让我觉得这两个曾经的梦想有可能实现，所以创立了QQ群。
 

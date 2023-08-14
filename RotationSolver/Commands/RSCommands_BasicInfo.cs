@@ -1,76 +1,67 @@
 ﻿using Dalamud.Game.Command;
-using RotationSolver.Data;
+using ECommons.DalamudServices;
 using RotationSolver.Localization;
-using System;
-using System.Linq;
 
-namespace RotationSolver.Commands
+namespace RotationSolver.Commands;
+
+public static partial class RSCommands
 {
-    internal static partial class RSCommands
+    internal static void Enable()
+        => Svc.Commands.AddHandler(Service.Command, new CommandInfo(OnCommand)
+        {
+            HelpMessage = LocalizationManager.RightLang.Commands_Rotation,
+            ShowInHelp = true,
+        });
+
+    internal static void Disable() => Svc.Commands.RemoveHandler(Service.Command);
+
+    private static void OnCommand(string command, string arguments)
     {
-        internal const string _command = "/rotation";
+        DoOneCommand(arguments);
+    }
 
-        internal static TargetingType TargetingType
+    private static void DoOneCommand(string str)
+    {
+        if (TryGetOneEnum<StateCommandType>(str, out var stateType))
         {
-            get
-            {
-                if (Service.Configuration.TargetingTypes.Count == 0)
-                {
-                    Service.Configuration.TargetingTypes.Add(TargetingType.Big);
-                    Service.Configuration.TargetingTypes.Add(TargetingType.Small);
-                    Service.Configuration.Save();
-                }
-
-                return Service.Configuration.TargetingTypes[Service.Configuration.TargetingIndex %= Service.Configuration.TargetingTypes.Count];
-            }
+            DoStateCommandType(stateType);
         }
-
-        internal static void Enable()
-            => Service.CommandManager.AddHandler(_command, new CommandInfo(OnCommand)
-            {
-                HelpMessage = LocalizationManager.RightLang.Commands_Rotation,
-                ShowInHelp = true,
-            });
-
-        internal static void Disable() => Service.CommandManager.RemoveHandler(_command);
-
-        private static void OnCommand(string command, string arguments)
+        else if (TryGetOneEnum<SpecialCommandType>(str, out var specialType))
         {
-            DoOneCommand(arguments);
+            DoSpecialCommandType(specialType);
         }
-        
-        private static void DoOneCommand(string str)
+        else if (TryGetOneEnum<OtherCommandType>(str, out var otherType))
         {
-            if (TryGetOneEnum<StateCommandType>(str, out var stateType))
-            {
-                DoStateCommandType(stateType);
-            }
-            else if (TryGetOneEnum<SpecialCommandType>(str, out var specialType))
-            {
-                DoSpecialCommandType(specialType);
-            }
-            else if (TryGetOneEnum<OtherCommandType>(str, out var otherType))
-            {
-                DoOtherCommand(otherType, str.Substring(otherType.ToString().Length).Trim());
-            }
-            else
-            {
-                RotationSolverPlugin.OpenConfigWindow();
-            }
+            DoOtherCommand(otherType, str[otherType.ToString().Length..].Trim());
         }
+        else
+        {
+            RotationSolverPlugin.OpenConfigWindow();
+        }
+    }
 
-        private static bool TryGetOneEnum<T>(string str, out T type) where T : struct, Enum
+    private static bool TryGetOneEnum<T>(string str, out T type) where T : struct, Enum
+    {
+        type = default;
+        try
         {
-            type = default;
-            try
-            {
-                type = Enum.GetValues<T>().First(c => str.StartsWith(c.ToString(), StringComparison.OrdinalIgnoreCase));
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
+            type = Enum.GetValues<T>().First(c => str.StartsWith(c.ToString(), StringComparison.OrdinalIgnoreCase));
+            return true;
         }
+        catch
+        {
+            return false;
+        }
+    }
+
+    internal static string GetCommandStr<T>(this T command, string extraCommand = "")
+        where T : struct, Enum
+    {
+        var cmdStr = Service.Command + " " + command.ToString();
+        if (!string.IsNullOrEmpty(extraCommand))
+        {
+            cmdStr += " " + extraCommand;
+        }
+        return cmdStr;
     }
 }
